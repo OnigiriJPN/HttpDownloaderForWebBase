@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="ja" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HttpDownloader</title>
+  <link rel="manifest" href="manifest.json">
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'class' }</script>
+  <!-- jQuery -->
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <style>
+    body { padding-top: env(titlebar-area-height, 0px); }
+    #titlebar {
+      position: fixed;
+      top: 0; left: 0;
+      width: env(titlebar-area-width, 100%);
+      height: env(titlebar-area-height, 0px);
+      app-region: drag;
+      -webkit-app-region: drag;
+      z-index: 50;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: rgba(100, 116, 139, 0.3); border-radius: 3px; }
+  </style>
+</head>
+<body class="h-full flex flex-col select-none antialiased bg-slate-950 text-slate-100">
+
+  <!-- WCO ドラッグ領域 -->
+  <div id="titlebar"></div>
+
+  <div class="max-w-2xl w-full mx-auto p-4 md:p-6 flex-1 flex flex-col space-y-6">
+    
+    <!-- ヘッダー -->
+    <header class="flex justify-between items-center border-b border-slate-800 pb-4">
+      <div>
+        <h1 class="text-lg font-black tracking-wider text-sky-400">HttpDownloader</h1>
+        <p class="text-[11px] text-slate-400">PWA Web HTTP Client & Downloader</p>
+      </div>
+      <div class="text-xs font-mono text-slate-400 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">
+        Status: <span id="connection-status" class="text-emerald-400 font-bold">Online</span>
+      </div>
+    </header>
+
+    <!-- 入力フォームエリア -->
+    <div class="bg-slate-900/80 p-5 rounded-xl border border-slate-800 space-y-4 shadow-lg">
+      <div>
+        <label class="block text-xs font-bold text-slate-400 mb-1">ダウンロード URL (HTTP / HTTPS)</label>
+        <div class="flex gap-2">
+          <input type="url" id="target-url" placeholder="https://example.com/file.zip" 
+            class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 font-mono text-sm focus:outline-none focus:border-sky-500">
+          <button id="btn-download" class="bg-sky-600 hover:bg-sky-500 text-white font-bold px-5 py-2 rounded-lg text-sm transition shadow">
+            取得開始
+          </button>
+        </div>
+      </div>
+
+      <!-- 詳細オプション / メソッド選択 -->
+      <div class="flex gap-4 items-center text-xs text-slate-400 pt-2 border-t border-slate-800/60">
+        <label class="flex items-center gap-1.5 cursor-pointer">
+          <input type="radio" name="dl-method" value="blob" checked class="text-sky-600 focus:ring-0"> 
+          Blob (通常ダウンロード)
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer">
+          <input type="radio" name="dl-method" value="stream" class="text-sky-600 focus:ring-0"> 
+          Stream (フェッチ確認)
+        </label>
+      </div>
+    </div>
+
+    <!-- 進捗・ログ表示エリア -->
+    <div class="bg-slate-900 p-5 rounded-xl border border-slate-800 flex-1 flex flex-col space-y-3 shadow-lg">
+      <div class="flex justify-between items-center text-xs">
+        <span class="font-bold text-slate-400">転送ログ / プログレス</span>
+        <button id="btn-clear" class="text-slate-500 hover:text-slate-300 transition">ログクリア</button>
+      </div>
+
+      <!-- プログレスバー -->
+      <div class="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+        <div id="progress-bar" class="bg-sky-500 h-full w-0 transition-all duration-200"></div>
+      </div>
+
+      <!-- ログコンソール -->
+      <div id="log-console" class="flex-1 bg-slate-950 rounded-lg p-3 font-mono text-xs text-slate-300 overflow-y-auto max-h-48 border border-slate-800/80 space-y-1">
+        <div class="text-slate-500">[System] 準備完了。URLを入力してください。</div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // Service Worker 登録
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').catch(err => console.warn('SW failed:', err));
+      });
+    }
+
+    // オンライン・オフライン検知
+    window.addEventListener('online', () => $('#connection-status').text('Online').removeClass('text-rose-400').addClass('text-emerald-400'));
+    window.addEventListener('offline', () => $('#connection-status').text('Offline').removeClass('text-emerald-400').addClass('text-rose-400'));
+
+    function addLog(msg, type = 'info') {
+      const colors = { info: 'text-slate-300', success: 'text-emerald-400', error: 'text-rose-400', warn: 'text-amber-400' };
+      const time = new Date().toLocaleTimeString();
+      $('#log-console').append(`<div class="${colors[type] || 'text-slate-300'}">[${time}] ${msg}</div>`);
+      $('#log-console').scrollTop($('#log-console')[0].scrollHeight);
+    }
+
+    $('#btn-clear').on('click', () => {
+      $('#log-console').empty();
+      addLog('ログをクリアしました。');
+    });
+
+    // ダウンロード処理
+    $('#btn-download').on('click', async () => {
+      const url = $('#target-url').val().trim();
+      if (!url) {
+        addLog('⚠️ 有効なURLを入力してください。', 'warn');
+        return;
+      }
+
+      const method = $('input[name="dl-method"]:checked').val();
+      addLog(`Connecting to: ${url}`);
+      $('#btn-download').prop('disabled', true).addClass('opacity-50');
+      $('#progress-bar').css('width', '10%');
+
+      try {
+        if (method === 'blob') {
+          // jQuery / Fetch を用いた一括取得 & Blob保存
+          addLog('データをフェッチ中...');
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP Error: ${response.status} ${response.statusText}`);
+          
+          $('#progress-bar').css('width', '50%');
+          const blob = await response.blob();
+          $('#progress-bar').css('width', '90%');
+
+          // URLからファイル名を抽出、またはデフォルト名
+          const filename = url.split('/').pop().split('?')[0] || 'downloaded-file';
+          
+          // ダウンロード用アンカータグを動的生成してトリガー
+          const blobUrl = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(blobUrl);
+
+          $('#progress-bar').css('width', '100%');
+          addLog(`✅ ダウンロード成功: ${filename} (${(blob.size / 1024).toFixed(1)} KB)`, 'success');
+        } else {
+          // ストリーム読み込みのデモ
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+          
+          const reader = response.body.getReader();
+          const contentLength = +response.headers.get('Content-Length') || 0;
+          let receivedLength = 0;
+          let chunks = [];
+
+          while(true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            receivedLength += value.length;
+            if (contentLength > 0) {
+              const percent = Math.round((receivedLength / contentLength) * 100);
+              $('#progress-bar').css('width', `${percent}%`);
+            }
+          }
+          addLog(`✅ ストリーム受信完了 (${receivedLength} bytes)`, 'success');
+        }
+      } catch (err) {
+        addLog(`❌ エラー発生: ${err.message}`, 'error');
+        $('#progress-bar').css('width', '0%');
+      } finally {
+        $('#btn-download').prop('disabled', false).removeClass('opacity-50');
+        setTimeout(() => $('#progress-bar').css('width', '0%'), 1500);
+      }
+    });
+  </script>
+</body>
+</html>
